@@ -1,4 +1,4 @@
-Shadowing 拼写练习（Windows）
+# Shadowing 拼写练习（Windows）
 
 使用方法
 1. 双击 ShadowingTrainer.exe。
