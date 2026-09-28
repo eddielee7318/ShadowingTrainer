@@ -1,23 +1,95 @@
-# Shadowing 拼写练习（Windows）
+<p align="center">
+  <img src="assets/shadowing_icon.png" alt="Shadowing Trainer" width="120">
+</p>
 
-使用方法
-1. 双击 ShadowingTrainer.exe。
-2. 点击“打开视频 / 音频”，或把媒体文件直接拖进窗口。支持 MP3、M4A、WAV、FLAC、AAC、OGG、Opus、WMA、AIFF、MKA 等常见音频。
-3. 程序会优先读取同集 SRT/ASS/SSA/VTT/TXT。有内嵌英文字幕时，自动用它校准时间和分句，并从外部字幕匹配中文。
-   没有内嵌字幕也可以直接用 SRT/ASS；必要时用“字幕校准”或“与下一句合并”微调。
-4. 点击“播放本句”。字幕结束时会自动暂停。
-5. 根据下划线提示输入听到的句子，按 Enter 逐词判定。
-6. 使用“下一句并播放”继续。练习结束后可导出 TXT 或 Word 报告。
-7. 句数右边的下拉框只显示句号，可滚动选择任意一句，不会提前透露答案；显示答案后，双语字幕会在下方显示中文。
-8. “打开文件夹”会递归读取根目录和所有子文件夹。视频、音频、SRT、ASS/SSA、VTT、LRC、TXT 会出现在右侧文件夹树，可用三角箭头展开或收起。
-9. “导入整个文件夹”使用专用文件夹选择界面。OK / okay 相互等价；普通单词忽略大小写，已识别的专有名词保留大小写检查。
-10. 阿拉伯数字、英文数词和单个中文数字按数值判定，例如 3 / three / 三、23 / twenty-three、1st / first 均可相互通过。
-11. 错词除了显示正确答案，还会说明是字母顺序写反、少写、多写、替换或专有名词大小写问题。
+<h1 align="center">Shadowing Trainer</h1>
 
-说明
-- “显示字幕”默认关闭，可随时打开。
-- TXT 每个非空行视为一句。由于纯 TXT 没有时间轴，会按视频总时长平均建立初始分段。
-- 内嵌字幕仅支持可转换的文字字幕轨；图片型字幕（例如部分 PGS）无法用于拼写判定。
-- 普通音频通常没有内嵌对话字幕，可配同名 SRT/ASS/VTT/TXT；文件夹内只有一个字幕时也会自动选中。
-- LRC 会使用自身的 [分:秒] 时间标签；支持 offset 偏移和同时间标签下的中英双语。
-- 快捷键：Ctrl+O 打开视频；Ctrl+R 重播；Alt+左右方向键切句；Ctrl+E 导出 TXT。
+<p align="center">
+  面向英语听写与 Shadowing 练习的 Windows 桌面软件<br>
+  视频、音频、字幕、逐词判定与错题导出，都在一个界面完成。
+</p>
+
+<p align="center">
+  <a href="https://github.com/eddielee7318/ShadowingTrainer/releases/latest"><strong>下载最新版</strong></a>
+  ·
+  <a href="#使用方法">使用方法</a>
+  ·
+  <a href="#从源码运行">从源码运行</a>
+</p>
+
+## 主要功能
+
+- 视频和音频按字幕逐句播放，到句尾自动暂停
+- 支持单句重播、循环播放、连续播放、播放速度和字幕时间校准
+- 字幕可隐藏或显示，答案揭晓后可显示匹配到的中文译文
+- 根据单词数量显示长短不一的下划线，并可开启首字母提示
+- 输入后逐词判定，错误答案显示在词框下方
+- 支持收起答案重新练习，并用 Enter 提交或进入下一句
+- 可把不重要或未对白的句子标记为跳过，不计入正确率
+- 可递归导入整个文件夹，并在右侧树形列表中选择不同剧集或音频
+- 可导出 TXT 或 Word 练习报告
+
+## 支持的文件
+
+| 类型 | 格式 |
+| --- | --- |
+| 视频 | MP4、MKV、AVI、MOV、WMV、WebM 等常见格式 |
+| 音频 | MP3、M4A、WAV、FLAC、AAC、OGG、Opus、WMA、AIFF、MKA 等 |
+| 字幕 | SRT、ASS、SSA、VTT、LRC、TXT，以及视频内嵌文字字幕 |
+
+程序会优先寻找同名外部字幕；存在可读取的内嵌英文字幕时，也可自动用于时间校准和分句。图片型字幕（例如部分 PGS）不能直接用于拼写判定。
+
+## 使用方法
+
+1. 从 [Releases](https://github.com/eddielee7318/ShadowingTrainer/releases/latest) 下载最新版 EXE。
+2. 双击运行后，选择“导入整个文件夹”或“打开单个视频 / 音频”。
+3. 选择对应媒体；程序会自动匹配外部字幕或尝试读取内嵌字幕。
+4. 点击“播放本句”，根据下划线提示输入听到的内容。
+5. 按 Enter 判词；显示结果后再次按 Enter 会进入下一句。
+6. 需要复习时可收起答案重来，练习结束后可导出报告。
+
+> 当前发布包未进行商业代码签名。Windows 第一次运行时可能显示安全提示，请核对 Release 页面提供的 SHA-256 后再运行。
+
+## 判词规则
+
+- 普通英文单词不区分大小写，识别到的专有名词会检查大小写
+- 直撇号和弯撇号等价；省略撇号也可通过，例如 `dont` / `don't`
+- `OK` 与 `okay` 等常见写法按等价处理
+- 阿拉伯数字、英文数词和单个中文数字按数值判定，例如 `3` / `three` / `三`
+- 错词会提示少写、多写、替换、字母顺序或专有名词大小写问题
+
+## 快捷键
+
+| 快捷键 | 功能 |
+| --- | --- |
+| `Ctrl+O` | 打开媒体 |
+| `Ctrl+R` | 重播本句 |
+| `Alt+←` / `Alt+→` | 上一句 / 下一句 |
+| `Ctrl+E` | 导出 TXT |
+
+## 从源码运行
+
+需要 Python 3.11 或更新版本：
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python main.py
+```
+
+运行测试：
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+## 构建 Windows 单文件版
+
+```powershell
+python -m pip install -r requirements-dev.txt
+pyinstaller --clean --noconfirm ShadowingTrainer.spec
+```
+
+生成的文件位于 `dist/ShadowingTrainer-v7.exe`。
