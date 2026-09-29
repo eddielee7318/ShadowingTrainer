@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from core import Caption, compare_words, explain_spelling_difference, find_matching_subtitle, list_library_files, list_media_files, parse_subtitle, repair_external_only_captions, tokenize
+from core import AnnotationNote, Attempt, Caption, HighlightNote, compare_words, explain_spelling_difference, export_docx, export_txt, find_matching_subtitle, list_library_files, list_media_files, parse_subtitle, repair_external_only_captions, tokenize
 
 
 def test_tokenize_and_compare():
@@ -176,3 +176,41 @@ def test_recursive_library_and_subfolder_subtitle_matching(tmp_path: Path):
     subtitle.write_text("[00:00.00]Hello.\n", encoding="utf-8")
     assert list_library_files(tmp_path) == [media, subtitle]
     assert find_matching_subtitle(media, tmp_path) == subtitle
+
+
+def test_highlight_notes_are_exported_to_txt_and_word(tmp_path: Path):
+    attempts = [Attempt(0, "The woods are well established.", "The woods are well established", 5, 5)]
+    highlights = [
+        HighlightNote(
+            index=0,
+            sentence="The woods are well established.",
+            selected="well established",
+            selection_start=14,
+            selection_end=30,
+            speaker="Neil",
+            start_ms=12340,
+        )
+    ]
+    annotations = [
+        AnnotationNote(
+            index=0,
+            sentence="The woods are well established.",
+            quote="established",
+            note="常用搭配：well established",
+            selection_start=19,
+            selection_end=30,
+            speaker="Neil",
+            start_ms=12340,
+        )
+    ]
+    txt_path = tmp_path / "notes.txt"
+    docx_path = tmp_path / "notes.docx"
+    export_txt(txt_path, "lesson.mp4", attempts, highlights, annotations)
+    exported = txt_path.read_text(encoding="utf-8-sig")
+    assert "荧光摘录（1 处）" in exported
+    assert "标记：well established" in exported
+    assert "第 1 句｜00:12｜Neil" in exported
+    assert "批注原文：established" in exported
+    assert "文字笔记：常用搭配：well established" in exported
+    export_docx(docx_path, "lesson.mp4", attempts, highlights, annotations)
+    assert docx_path.stat().st_size > 0

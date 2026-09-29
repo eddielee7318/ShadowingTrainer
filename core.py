@@ -46,6 +46,31 @@ class Attempt:
         return 100.0 if self.total_words == 0 else self.correct_words / self.total_words * 100
 
 
+@dataclass
+class HighlightNote:
+    index: int
+    sentence: str
+    selected: str
+    selection_start: int
+    selection_end: int
+    speaker: str = ""
+    start_ms: int = 0
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class AnnotationNote:
+    index: int
+    sentence: str
+    quote: str
+    note: str
+    selection_start: int
+    selection_end: int
+    speaker: str = ""
+    start_ms: int = 0
+    created_at: datetime = field(default_factory=datetime.now)
+
+
 def clean_raw_caption_parts(text: str) -> list[str]:
     # Bilingual ASS files commonly put Chinese and English on separate lines.
     # Prefer the Latin-script line when one exists, while keeping monolingual
@@ -615,7 +640,15 @@ def format_ms(milliseconds: int) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
-def export_txt(path: str | Path, media_name: str, attempts: list[Attempt]) -> None:
+def export_txt(
+    path: str | Path,
+    media_name: str,
+    attempts: list[Attempt],
+    highlights: list[HighlightNote] | None = None,
+    annotations: list[AnnotationNote] | None = None,
+) -> None:
+    highlights = highlights or []
+    annotations = annotations or []
     answered = len(attempts)
     total_words = sum(a.total_words for a in attempts)
     correct_words = sum(a.correct_words for a in attempts)
@@ -639,13 +672,50 @@ def export_txt(path: str | Path, media_name: str, attempts: list[Attempt]) -> No
                 "",
             ]
         )
+    if highlights:
+        lines.extend(["", f"荧光摘录（{len(highlights)} 处）", ""])
+        for note in sorted(highlights, key=lambda item: (item.index, item.selection_start, item.created_at)):
+            location = f"第 {note.index + 1} 句｜{format_ms(note.start_ms)}"
+            if note.speaker:
+                location += f"｜{note.speaker}"
+            lines.extend(
+                [
+                    location,
+                    f"标记：{note.selected}",
+                    f"原句：{note.sentence}",
+                    "",
+                ]
+            )
+    if annotations:
+        lines.extend(["", f"文字笔记（{len(annotations)} 条）", ""])
+        for annotation in sorted(annotations, key=lambda item: (item.index, item.selection_start, item.created_at)):
+            location = f"第 {annotation.index + 1} 句｜{format_ms(annotation.start_ms)}"
+            if annotation.speaker:
+                location += f"｜{annotation.speaker}"
+            lines.extend(
+                [
+                    location,
+                    f"批注原文：{annotation.quote or '（整句）'}",
+                    f"文字笔记：{annotation.note}",
+                    f"完整原句：{annotation.sentence}",
+                    "",
+                ]
+            )
     Path(path).write_text("\n".join(lines), encoding="utf-8-sig")
 
 
-def export_docx(path: str | Path, media_name: str, attempts: list[Attempt]) -> None:
+def export_docx(
+    path: str | Path,
+    media_name: str,
+    attempts: list[Attempt],
+    highlights: list[HighlightNote] | None = None,
+    annotations: list[AnnotationNote] | None = None,
+) -> None:
     from docx import Document
     from docx.shared import Pt
 
+    highlights = highlights or []
+    annotations = annotations or []
     document = Document()
     styles = document.styles
     styles["Normal"].font.name = "Microsoft YaHei"
@@ -675,4 +745,39 @@ def export_docx(path: str | Path, media_name: str, attempts: list[Attempt]) -> N
         ]
         for cell, value in zip(cells, values):
             cell.text = value
+    if highlights:
+        document.add_heading(f"荧光摘录（{len(highlights)} 处）", level=1)
+        notes_table = document.add_table(rows=1, cols=4)
+        notes_table.style = "Table Grid"
+        note_headers = ["句号 / 时间", "说话人", "标记", "原句"]
+        for cell, header in zip(notes_table.rows[0].cells, note_headers):
+            cell.text = header
+        for note in sorted(highlights, key=lambda item: (item.index, item.selection_start, item.created_at)):
+            cells = notes_table.add_row().cells
+            values = [
+                f"第 {note.index + 1} 句 / {format_ms(note.start_ms)}",
+                note.speaker or "未标注",
+                note.selected,
+                note.sentence,
+            ]
+            for cell, value in zip(cells, values):
+                cell.text = value
+    if annotations:
+        document.add_heading(f"文字笔记（{len(annotations)} 条）", level=1)
+        annotations_table = document.add_table(rows=1, cols=5)
+        annotations_table.style = "Table Grid"
+        annotation_headers = ["句号 / 时间", "说话人", "批注原文", "文字笔记", "完整原句"]
+        for cell, header in zip(annotations_table.rows[0].cells, annotation_headers):
+            cell.text = header
+        for annotation in sorted(annotations, key=lambda item: (item.index, item.selection_start, item.created_at)):
+            cells = annotations_table.add_row().cells
+            values = [
+                f"第 {annotation.index + 1} 句 / {format_ms(annotation.start_ms)}",
+                annotation.speaker or "未标注",
+                annotation.quote or "（整句）",
+                annotation.note,
+                annotation.sentence,
+            ]
+            for cell, value in zip(cells, values):
+                cell.text = value
     document.save(str(path))

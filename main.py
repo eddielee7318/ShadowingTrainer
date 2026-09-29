@@ -5,11 +5,12 @@ import json
 import re
 import sys
 import ctypes
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSettings, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QPainter, QPen, QPixmap
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtCore import QPoint, QRect, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QPainter, QPen, QPixmap, QTextCharFormat, QTextCursor
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
     QInputDialog,
@@ -37,8 +40,10 @@ from PySide6.QtWidgets import (
 
 from core import (
     AUDIO_EXTENSIONS,
+    AnnotationNote,
     Attempt,
     Caption,
+    HighlightNote,
     MEDIA_EXTENSIONS,
     SUBTITLE_EXTENSIONS,
     VIDEO_EXTENSIONS,
@@ -59,7 +64,8 @@ from core import (
 )
 
 
-APP_NAME = "Shadowing 拼写练习"
+APP_VERSION = "8.0.0"
+APP_NAME = "Shadowing 拼写练习 V8"
 
 
 def resource_path(relative: str) -> Path:
@@ -219,10 +225,13 @@ class MainWindow(QMainWindow):
         self.captions: list[Caption] = []
         self.current_index = 0
         self.attempts: list[Attempt] = []
+        self.highlight_notes: list[HighlightNote] = []
+        self.annotation_notes: list[AnnotationNote] = []
         self.skipped_texts: set[str] = set()
         self.plain_text_timing = False
         self.segment_playing = False
         self.slider_dragging = False
+        self.loop_request_id = 0
         self.subtitle_offset_ms = 0
         self.lead_padding_ms = 700
         self.tail_padding_ms = 800
@@ -237,7 +246,21 @@ class MainWindow(QMainWindow):
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio)
 
+        self.preview_audio = QAudioOutput(self)
+        self.preview_audio.setMuted(True)
+        self.preview_player = QMediaPlayer(self)
+        self.preview_player.setAudioOutput(self.preview_audio)
+        self.preview_sink = QVideoSink(self)
+        self.preview_player.setVideoSink(self.preview_sink)
+        self.preview_sink.videoFrameChanged.connect(self.thumbnail_frame_changed)
+        self.preview_position_ms = 0
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.setInterval(90)
+        self.preview_timer.timeout.connect(self.request_thumbnail_frame)
+
         self._build_ui()
+        self._build_thumbnail_popup()
         self._connect_player()
         self._setup_shortcuts()
         self._apply_theme()
@@ -322,12 +345,14 @@ class MainWindow(QMainWindow):
         repeat_button.clicked.connect(self.play_current_segment)
         transport.addWidget(repeat_button)
         self.loop_checkbox = QCheckBox("单句循环")
+        self.loop_checkbox.toggled.connect(self.loop_setting_changed)
         transport.addWidget(self.loop_checkbox)
         self.time_label = QLabel("00:00 / 00:00")
         transport.addWidget(self.time_label)
         self.seek = QSlider(Qt.Horizontal)
         self.seek.setRange(0, 0)
-        self.seek.sliderPressed.connect(lambda: setattr(self, "slider_dragging", True))
+        self.seek.sliderPressed.connect(self.seek_pressed)
+        self.seek.sliderMoved.connect(self.seek_preview_moved)
         self.seek.sliderReleased.connect(self.seek_released)
         transport.addWidget(self.seek, 1)
         video_layout.addLayout(transport)
@@ -448,6 +473,28 @@ class MainWindow(QMainWindow):
         self.answer_label.setObjectName("answer")
         practice_layout.addWidget(self.answer_label)
 
+        self.original_panel = QWidget()
+        original_layout = QVBoxLayout(self.original_panel)
+        original_layout.setContentsMargins(0, 0, 0, 0)
+        original_layout.setSpacing(5)
+        original_header = QHBoxLayout()
+        original_title = QLabel("原句（拖动选择词或短语，右键荧光高亮并加入笔记）")
+        original_title.setObjectName("muted")
+        original_header.addWidget(original_title)
+        original_header.addStretch()
+        original_layout.addLayout(original_header)
+        self.original_text = QTextEdit()
+        self.original_text.setObjectName("originalSentence")
+        self.original_text.setReadOnly(True)
+        self.original_text.setAcceptRichText(False)
+        self.original_text.setMinimumHeight(72)
+        self.original_text.setMaximumHeight(104)
+        self.original_text.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.original_text.customContextMenuRequested.connect(self.show_original_context_menu)
+        original_layout.addWidget(self.original_text)
+        self.original_panel.hide()
+        practice_layout.addWidget(self.original_panel)
+
         self.translation_label = QLabel("")
         self.translation_label.setWordWrap(True)
         self.translation_label.setObjectName("translation")
@@ -476,7 +523,7 @@ class MainWindow(QMainWindow):
         self.skip_button.clicked.connect(self.toggle_skip_current)
         actions.addWidget(self.skip_button)
         actions.addStretch()
-        export_txt_button = QPushButton("导出 TXT")
+        export_txt_button = QPushButton("导出 TXT / 笔记")
         export_txt_button.clicked.connect(lambda: self.export_report("txt"))
         actions.addWidget(export_txt_button)
         export_word_button = QPushButton("导出 Word")
@@ -523,6 +570,25 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("支持选择整个文件夹，递归读取视频、音频、SRT、LRC 和 TXT")
 
+    def _build_thumbnail_popup(self) -> None:
+        self.thumbnail_popup = QFrame(self, Qt.ToolTip | Qt.FramelessWindowHint)
+        self.thumbnail_popup.setObjectName("thumbnailPopup")
+        self.thumbnail_popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        popup_layout = QVBoxLayout(self.thumbnail_popup)
+        popup_layout.setContentsMargins(7, 7, 7, 6)
+        popup_layout.setSpacing(4)
+        self.thumbnail_image = QLabel("拖动进度条预览")
+        self.thumbnail_image.setObjectName("thumbnailImage")
+        self.thumbnail_image.setAlignment(Qt.AlignCenter)
+        self.thumbnail_image.setFixedSize(224, 126)
+        popup_layout.addWidget(self.thumbnail_image)
+        self.thumbnail_time = QLabel("00:00")
+        self.thumbnail_time.setAlignment(Qt.AlignCenter)
+        self.thumbnail_time.setObjectName("thumbnailTime")
+        popup_layout.addWidget(self.thumbnail_time)
+        self.thumbnail_popup.adjustSize()
+        self.thumbnail_popup.hide()
+
     def _connect_player(self) -> None:
         self.player.positionChanged.connect(self.position_changed)
         self.player.durationChanged.connect(self.duration_changed)
@@ -555,6 +621,10 @@ class MainWindow(QMainWindow):
             QLabel#translation { color: #f4d06f; background: #121722; border-left: 3px solid #d9ad45; padding: 7px 10px; }
             QLabel#subtitleLine { background: #07090e; color: #ffffff; padding: 8px 14px; border-radius: 6px; font-size: 19px; font-weight: 600; }
             QLabel#audioPanel { background: #080b12; border: 1px solid #252d3d; border-radius: 10px; color: #cbd4ea; font-size: 24px; font-weight: 600; padding: 30px; }
+            QFrame#thumbnailPopup { background: #0b0e15; border: 1px solid #59647c; border-radius: 8px; }
+            QLabel#thumbnailImage { background: #050608; color: #8d97ad; border-radius: 5px; }
+            QLabel#thumbnailTime { color: #ffffff; font-weight: 700; }
+            QTextEdit#originalSentence { background: #111722; border: 1px solid #38435a; border-radius: 8px; padding: 8px 10px; color: #edf1fa; font-size: 16px; selection-background-color: #7180ff; }
             QVideoWidget { background: #050608; border-radius: 10px; }
             QFrame#practiceCard { background: #1a1f2b; border: 1px solid #2b3344; border-radius: 12px; }
             QFrame#episodeSidebar { background: #171c27; border: 1px solid #2b3344; border-radius: 10px; }
@@ -738,6 +808,104 @@ class MainWindow(QMainWindow):
         if key:
             self.settings.setValue(key, json.dumps(sorted(self.skipped_texts), ensure_ascii=False))
 
+    def _highlight_settings_key(self) -> str:
+        source = self.media_path or self.subtitle_path
+        if not source:
+            return ""
+        digest = hashlib.sha1(str(source.resolve()).casefold().encode("utf-8")).hexdigest()
+        return f"highlights/{digest}"
+
+    def _load_highlight_notes(self) -> None:
+        key = self._highlight_settings_key()
+        raw = self.settings.value(key, "[]", str) if key else "[]"
+        self.highlight_notes = []
+        try:
+            items = json.loads(raw)
+            for item in items:
+                self.highlight_notes.append(
+                    HighlightNote(
+                        index=int(item["index"]),
+                        sentence=str(item["sentence"]),
+                        selected=str(item["selected"]),
+                        selection_start=int(item["selection_start"]),
+                        selection_end=int(item["selection_end"]),
+                        speaker=str(item.get("speaker", "")),
+                        start_ms=int(item.get("start_ms", 0)),
+                        created_at=datetime.fromisoformat(item["created_at"]),
+                    )
+                )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self.highlight_notes = []
+
+    def _save_highlight_notes(self) -> None:
+        key = self._highlight_settings_key()
+        if not key:
+            return
+        payload = [
+            {
+                "index": note.index,
+                "sentence": note.sentence,
+                "selected": note.selected,
+                "selection_start": note.selection_start,
+                "selection_end": note.selection_end,
+                "speaker": note.speaker,
+                "start_ms": note.start_ms,
+                "created_at": note.created_at.isoformat(),
+            }
+            for note in self.highlight_notes
+        ]
+        self.settings.setValue(key, json.dumps(payload, ensure_ascii=False))
+
+    def _annotation_settings_key(self) -> str:
+        source = self.media_path or self.subtitle_path
+        if not source:
+            return ""
+        digest = hashlib.sha1(str(source.resolve()).casefold().encode("utf-8")).hexdigest()
+        return f"annotations/{digest}"
+
+    def _load_annotation_notes(self) -> None:
+        key = self._annotation_settings_key()
+        raw = self.settings.value(key, "[]", str) if key else "[]"
+        self.annotation_notes = []
+        try:
+            items = json.loads(raw)
+            for item in items:
+                self.annotation_notes.append(
+                    AnnotationNote(
+                        index=int(item["index"]),
+                        sentence=str(item["sentence"]),
+                        quote=str(item.get("quote", "")),
+                        note=str(item["note"]),
+                        selection_start=int(item.get("selection_start", 0)),
+                        selection_end=int(item.get("selection_end", 0)),
+                        speaker=str(item.get("speaker", "")),
+                        start_ms=int(item.get("start_ms", 0)),
+                        created_at=datetime.fromisoformat(item["created_at"]),
+                    )
+                )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self.annotation_notes = []
+
+    def _save_annotation_notes(self) -> None:
+        key = self._annotation_settings_key()
+        if not key:
+            return
+        payload = [
+            {
+                "index": note.index,
+                "sentence": note.sentence,
+                "quote": note.quote,
+                "note": note.note,
+                "selection_start": note.selection_start,
+                "selection_end": note.selection_end,
+                "speaker": note.speaker,
+                "start_ms": note.start_ms,
+                "created_at": note.created_at.isoformat(),
+            }
+            for note in self.annotation_notes
+        ]
+        self.settings.setValue(key, json.dumps(payload, ensure_ascii=False))
+
     def load_folder(self, folder: Path) -> None:
         library_files = self.populate_episode_sidebar(folder)
         if not library_files:
@@ -754,9 +922,15 @@ class MainWindow(QMainWindow):
 
     def load_media(self, path: Path, keep_library: bool = False) -> None:
         self.player.stop()
+        self.preview_player.stop()
+        self.thumbnail_popup.hide()
+        self.thumbnail_image.clear()
+        self.thumbnail_image.setText("拖动进度条预览")
         self.media_path = path
         self.attempts.clear()
         self._load_skipped_texts()
+        self._load_highlight_notes()
+        self._load_annotation_notes()
         self.captions.clear()
         self.synced_with_embedded = False
         self.current_index = 0
@@ -768,6 +942,10 @@ class MainWindow(QMainWindow):
         if is_audio:
             self.audio_panel.setText(f"♫\n{path.name}\n\n音频听写模式")
         self.player.setSource(QUrl.fromLocalFile(str(path)))
+        if is_audio:
+            self.preview_player.setSource(QUrl())
+        else:
+            self.preview_player.setSource(QUrl.fromLocalFile(str(path)))
         media_kind = "音频" if is_audio else "视频"
         self.statusBar().showMessage(f"已载入{media_kind}：{path.name}，正在查找字幕……")
         matching = find_matching_subtitle(path, self.library_root if keep_library else path.parent)
@@ -814,6 +992,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, "字幕文件里没有找到可练习的句子。")
             return
         self.subtitle_path = path
+        if not self.media_path:
+            self._load_highlight_notes()
+            self._load_annotation_notes()
         self.synced_with_embedded = False
         sync_note = ""
         if not embedded and self.media_path and not plain:
@@ -886,6 +1067,59 @@ class MainWindow(QMainWindow):
             self.captions = retime_plain_text(self.captions, duration)
             self.load_current_caption()
 
+    def seek_pressed(self) -> None:
+        self.slider_dragging = True
+        self.seek_preview_moved(self.seek.value())
+
+    def seek_preview_moved(self, position: int) -> None:
+        if not self.media_path or self.media_path.suffix.lower() not in VIDEO_EXTENSIONS:
+            return
+        self.preview_position_ms = max(0, int(position))
+        self.thumbnail_time.setText(format_ms(self.preview_position_ms))
+        current_pixmap = self.thumbnail_image.pixmap()
+        if current_pixmap is None or current_pixmap.isNull():
+            self.thumbnail_image.setText("正在读取缩略图…")
+        self._position_thumbnail_popup(self.preview_position_ms)
+        self.thumbnail_popup.show()
+        self.preview_timer.start()
+
+    def _position_thumbnail_popup(self, position: int) -> None:
+        duration = max(1, self.player.duration())
+        ratio = min(1.0, max(0.0, position / duration))
+        slider_x = round(10 + ratio * max(1, self.seek.width() - 20))
+        popup_size = self.thumbnail_popup.sizeHint()
+        anchor = self.seek.mapToGlobal(QPoint(slider_x, 0))
+        x = anchor.x() - popup_size.width() // 2
+        y = anchor.y() - popup_size.height() - 10
+        screen = QApplication.screenAt(anchor)
+        if screen:
+            available = screen.availableGeometry()
+            x = min(max(x, available.left() + 4), available.right() - popup_size.width() - 4)
+            if y < available.top():
+                y = self.seek.mapToGlobal(QPoint(slider_x, self.seek.height() + 10)).y()
+        self.thumbnail_popup.move(x, y)
+
+    def request_thumbnail_frame(self) -> None:
+        if not self.slider_dragging or not self.media_path or self.media_path.suffix.lower() not in VIDEO_EXTENSIONS:
+            return
+        self.preview_player.setPosition(self.preview_position_ms)
+        self.preview_player.play()
+
+    def thumbnail_frame_changed(self, frame) -> None:
+        if not self.slider_dragging or not frame.isValid():
+            return
+        image = frame.toImage()
+        if image.isNull():
+            return
+        pixmap = QPixmap.fromImage(image).scaled(
+            self.thumbnail_image.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.thumbnail_image.setText("")
+        self.thumbnail_image.setPixmap(pixmap)
+        self.preview_player.pause()
+
     def subtitle_offset_changed(self, seconds: float) -> None:
         self.subtitle_offset_ms = int(seconds * 1000)
         self.settings.setValue("subtitle_offset_seconds", seconds)
@@ -950,12 +1184,31 @@ class MainWindow(QMainWindow):
                 self.player.pause()
                 self.player.setPosition(end)
                 if self.loop_checkbox.isChecked():
-                    QTimer.singleShot(180, self.play_current_segment)
+                    self.loop_request_id += 1
+                    request_id = self.loop_request_id
+                    caption_index = self.current_index
+                    QTimer.singleShot(180, lambda: self.repeat_if_current(request_id, caption_index))
+
+    def repeat_if_current(self, request_id: int, caption_index: int) -> None:
+        if (
+            request_id == self.loop_request_id
+            and caption_index == self.current_index
+            and self.loop_checkbox.isChecked()
+        ):
+            self.play_current_segment()
 
     def seek_released(self) -> None:
         self.slider_dragging = False
+        self.preview_timer.stop()
+        self.preview_player.pause()
+        self.thumbnail_popup.hide()
+        self.loop_request_id += 1
         self.segment_playing = False
         self.player.setPosition(self.seek.value())
+
+    def loop_setting_changed(self, checked: bool) -> None:
+        if not checked:
+            self.loop_request_id += 1
 
     def playback_state_changed(self, state) -> None:
         playing = state == QMediaPlayer.PlayingState
@@ -967,6 +1220,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"媒体播放错误：{error_text}")
 
     def play_current_segment(self) -> None:
+        self.loop_request_id += 1
         if not self.media_path:
             self.choose_media()
             return
@@ -984,6 +1238,7 @@ class MainWindow(QMainWindow):
         self.input.setFocus()
 
     def play_normal(self) -> None:
+        self.loop_request_id += 1
         if not self.media_path:
             self.choose_media()
             return
@@ -996,6 +1251,7 @@ class MainWindow(QMainWindow):
     def load_current_caption(self) -> None:
         if not self.captions:
             return
+        self.loop_request_id += 1
         caption = self.captions[self.current_index]
         self.sentence_combo.blockSignals(True)
         self.sentence_combo.setCurrentIndex(self.current_index)
@@ -1018,6 +1274,8 @@ class MainWindow(QMainWindow):
         self.word_track.set_sentence(caption.text)
         self.input.clear()
         self.answer_label.clear()
+        self.original_text.clear()
+        self.original_panel.hide()
         self.translation_label.clear()
         self.translation_label.hide()
         self.answer_button.setText("显示答案")
@@ -1026,6 +1284,212 @@ class MainWindow(QMainWindow):
         self.segment_playing = False
         self.update_subtitle_overlay()
         self.input.setFocus()
+
+    def _current_highlights(self) -> list[HighlightNote]:
+        if not self.captions:
+            return []
+        sentence = self.captions[self.current_index].text
+        return [
+            note
+            for note in self.highlight_notes
+            if note.index == self.current_index and note.sentence == sentence
+        ]
+
+    def _current_annotations(self) -> list[AnnotationNote]:
+        if not self.captions:
+            return []
+        sentence = self.captions[self.current_index].text
+        return [
+            note
+            for note in self.annotation_notes
+            if note.index == self.current_index and note.sentence == sentence
+        ]
+
+    def _show_original_sentence(self) -> None:
+        if not self.captions:
+            return
+        sentence = self.captions[self.current_index].text
+        if self.original_text.toPlainText() != sentence:
+            self.original_text.setPlainText(sentence)
+        self._apply_highlights()
+        self.original_panel.show()
+
+    def _apply_highlights(self) -> None:
+        selections: list[QTextEdit.ExtraSelection] = []
+        text_length = len(self.original_text.toPlainText())
+        for note in self._current_highlights():
+            start = min(max(0, note.selection_start), text_length)
+            end = min(max(start, note.selection_end), text_length)
+            if end <= start:
+                continue
+            cursor = QTextCursor(self.original_text.document())
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format = QTextCharFormat()
+            selection.format.setBackground(QColor("#ffe066"))
+            selection.format.setForeground(QColor("#111318"))
+            selections.append(selection)
+        for note in self._current_annotations():
+            start = min(max(0, note.selection_start), text_length)
+            end = min(max(start, note.selection_end), text_length)
+            if end <= start:
+                continue
+            cursor = QTextCursor(self.original_text.document())
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format = QTextCharFormat()
+            selection.format.setBackground(QColor("#274b78"))
+            selection.format.setForeground(QColor("#dbeafe"))
+            selections.append(selection)
+        self.original_text.setExtraSelections(selections)
+
+    def _selected_original_span(self) -> tuple[int, int, str]:
+        cursor = self.original_text.textCursor()
+        start, end = sorted((cursor.selectionStart(), cursor.selectionEnd()))
+        sentence = self.original_text.toPlainText()
+        while start < end and sentence[start].isspace():
+            start += 1
+        while end > start and sentence[end - 1].isspace():
+            end -= 1
+        return start, end, sentence[start:end]
+
+    def show_original_context_menu(self, position: QPoint) -> None:
+        if not self.captions or not self.original_panel.isVisible():
+            return
+        start, end, selected = self._selected_original_span()
+        menu = QMenu(self.original_text)
+        highlight_action = menu.addAction("🖍 荧光笔")
+        highlight_action.setEnabled(bool(selected))
+        highlight_action.triggered.connect(self.highlight_selected_text)
+        annotation_action = menu.addAction("📝 添加文字笔记…")
+        annotation_action.triggered.connect(self.add_annotation_note)
+        clear_action = menu.addAction("⌫ 清除所选荧光格式")
+        clear_action.setEnabled(bool(selected))
+        clear_action.triggered.connect(self.clear_selected_highlight)
+        current_annotations = [
+            note for note in self._current_annotations()
+            if selected and note.selection_start < end and note.selection_end > start
+        ]
+        delete_note_action = menu.addAction("🗑 删除所选文字的笔记")
+        delete_note_action.setEnabled(bool(current_annotations))
+        delete_note_action.triggered.connect(lambda: self.delete_annotation_notes(current_annotations))
+        menu.addSeparator()
+        copy_action = menu.addAction("📋 复制所选文字")
+        copy_action.setEnabled(bool(selected))
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(selected))
+        menu.exec(self.original_text.mapToGlobal(position))
+
+    def highlight_selected_text(self) -> None:
+        if not self.captions or not self.original_panel.isVisible():
+            QMessageBox.information(self, APP_NAME, "请先显示答案，再在原句里拖动选择要收藏的词。")
+            return
+        start, end, selected = self._selected_original_span()
+        sentence = self.original_text.toPlainText()
+        if not selected:
+            QMessageBox.information(self, APP_NAME, "请先用鼠标拖动选择一个词或短语。")
+            return
+        duplicates = [
+            note for note in self.highlight_notes
+            if (
+            note.index == self.current_index
+            and note.sentence == sentence
+            and note.selection_start == start
+            and note.selection_end == end
+            )
+        ]
+        if duplicates:
+            duplicate_ids = {id(note) for note in duplicates}
+            self.highlight_notes = [note for note in self.highlight_notes if id(note) not in duplicate_ids]
+            message = f"已取消荧光标记：{selected}"
+        else:
+            caption = self.captions[self.current_index]
+            self.highlight_notes.append(
+                HighlightNote(
+                    index=self.current_index,
+                    sentence=sentence,
+                    selected=selected,
+                    selection_start=start,
+                    selection_end=end,
+                    speaker=caption.speaker,
+                    start_ms=caption.start_ms,
+                )
+            )
+            message = f"已用荧光笔标记：{selected}"
+        self._save_highlight_notes()
+        self._apply_highlights()
+        self.statusBar().showMessage(f"{message}（共 {len(self.highlight_notes)} 处）")
+
+    def add_annotation_note(self) -> None:
+        if not self.captions or not self.original_panel.isVisible():
+            return
+        start, end, selected = self._selected_original_span()
+        prompt_quote = selected or "（整句）"
+        note_text, accepted = QInputDialog.getMultiLineText(
+            self,
+            "添加文字笔记",
+            f"批注原文：{prompt_quote}\n\n请输入笔记：",
+            "",
+        )
+        note_text = note_text.strip()
+        if not accepted or not note_text:
+            return
+        caption = self.captions[self.current_index]
+        self.annotation_notes.append(
+            AnnotationNote(
+                index=self.current_index,
+                sentence=caption.text,
+                quote=selected,
+                note=note_text,
+                selection_start=start,
+                selection_end=end,
+                speaker=caption.speaker,
+                start_ms=caption.start_ms,
+            )
+        )
+        self._save_annotation_notes()
+        self._apply_highlights()
+        self.statusBar().showMessage(f"已添加文字笔记（共 {len(self.annotation_notes)} 条）")
+
+    def clear_selected_highlight(self) -> None:
+        start, end, selected = self._selected_original_span()
+        if not selected:
+            return
+        before = len(self.highlight_notes)
+        self.highlight_notes = [
+            note for note in self.highlight_notes
+            if not (
+                note.index == self.current_index
+                and note.sentence == self.original_text.toPlainText()
+                and note.selection_start < end
+                and note.selection_end > start
+            )
+        ]
+        if len(self.highlight_notes) != before:
+            self._save_highlight_notes()
+            self._apply_highlights()
+            self.statusBar().showMessage("已清除所选文字的荧光格式")
+
+    def delete_annotation_notes(self, notes: list[AnnotationNote]) -> None:
+        note_ids = {id(note) for note in notes}
+        self.annotation_notes = [note for note in self.annotation_notes if id(note) not in note_ids]
+        self._save_annotation_notes()
+        self._apply_highlights()
+        self.statusBar().showMessage(f"已删除 {len(notes)} 条文字笔记")
+
+    def clear_current_highlights(self) -> None:
+        current = self._current_highlights()
+        if not current:
+            self.statusBar().showMessage("这句还没有荧光标记")
+            return
+        current_ids = {id(note) for note in current}
+        self.highlight_notes = [note for note in self.highlight_notes if id(note) not in current_ids]
+        self._save_highlight_notes()
+        self._apply_highlights()
+        self.statusBar().showMessage("已清除本句的荧光标记")
 
     def update_subtitle_overlay(self) -> None:
         if self.subtitle_toggle.isChecked() and self.captions:
@@ -1071,7 +1535,8 @@ class MainWindow(QMainWindow):
                 item += f"（{reason}）"
             wrong.append(item)
         detail = "全部正确！" if not wrong else "需要注意：" + "；".join(wrong)
-        self.answer_label.setText(f"原句：{expected}\n本句 {correct}/{total}（{attempt.score:.1f}%）　{detail}")
+        self._show_original_sentence()
+        self.answer_label.setText(f"本句 {correct}/{total}（{attempt.score:.1f}%）　{detail}")
         self._show_translation()
         all_correct = sum(a.correct_words for a in self.attempts)
         all_words = sum(a.total_words for a in self.attempts)
@@ -1092,13 +1557,16 @@ class MainWindow(QMainWindow):
             self.word_track.reveal(False)
             self.input.clear()
             self.answer_label.clear()
+            self.original_text.clear()
+            self.original_panel.hide()
             self.translation_label.clear()
             self.translation_label.hide()
             self.answer_button.setText("显示答案")
             self.input.setFocus()
         else:
             self.word_track.reveal(True)
-            self.answer_label.setText(f"原句：{self.captions[self.current_index].text}")
+            self._show_original_sentence()
+            self.answer_label.setText("可在上方原句中拖动选择单词或短语，右键使用荧光笔或添加文字笔记。")
             self._show_translation()
             self.answer_button.setText("收起答案，再来一遍")
 
@@ -1171,8 +1639,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(120, self.play_current_segment)
 
     def export_report(self, kind: str) -> None:
-        if not self.attempts:
-            QMessageBox.information(self, APP_NAME, "还没有已提交的练习记录。先完成并提交至少一句。")
+        if not self.attempts and not self.highlight_notes and not self.annotation_notes:
+            QMessageBox.information(self, APP_NAME, "还没有练习记录或荧光笔记。先提交一句，或在原句中标记单词。")
             return
         base = self.media_path.stem if self.media_path else "shadowing练习"
         if kind == "txt":
@@ -1183,9 +1651,9 @@ class MainWindow(QMainWindow):
             return
         try:
             if kind == "txt":
-                export_txt(path, self.media_path.name if self.media_path else base, self.attempts)
+                export_txt(path, self.media_path.name if self.media_path else base, self.attempts, self.highlight_notes, self.annotation_notes)
             else:
-                export_docx(path, self.media_path.name if self.media_path else base, self.attempts)
+                export_docx(path, self.media_path.name if self.media_path else base, self.attempts, self.highlight_notes, self.annotation_notes)
             self.statusBar().showMessage(f"练习报告已导出：{path}")
             QMessageBox.information(self, APP_NAME, f"导出完成：\n{path}")
         except Exception as exc:
@@ -1195,7 +1663,7 @@ class MainWindow(QMainWindow):
 def main() -> int:
     if sys.platform == "win32":
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ShadowingTrainer.v7")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ShadowingTrainer.v8")
         except (AttributeError, OSError):
             pass
     app = QApplication(sys.argv)

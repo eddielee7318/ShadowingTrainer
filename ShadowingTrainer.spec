@@ -60,7 +60,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='ShadowingTrainer-v7',
+    name='ShadowingTrainer-v8',
     icon='assets/shadowing_icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
